@@ -129,6 +129,17 @@
             height: 24px;
             fill: white;
         }
+        /* Невидимая кнопка полноэкранного режима в левом верхнем углу */
+        #secret-fullscreen-btn {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 50px;
+            height: 50px;
+            background: transparent;
+            z-index: 100;
+            cursor: pointer;
+        }
         /* Игровой интерфейс, джойстики, кнопки действий */
         #game-ui {
             position: absolute;
@@ -287,6 +298,8 @@
 </head>
 <body>
 
+    <div id="secret-fullscreen-btn" onclick="toggleFullscreen()"></div>
+
     <div id="canvas-container"></div>
 
     <div class="gear-btn id-menu-elem" onclick="openSkinModal()">
@@ -366,6 +379,7 @@
         // Игровое состояние
         let scene, camera, renderer;
         let clock = new THREE.Clock();
+        let lastNetSendTime = 0; // Для предотвращения зависания WebRTC
         
         // Оптимизированные структуры для коллизий дома
         let houseCollisionBoxes = [];
@@ -443,10 +457,22 @@
             const tex = new THREE.CanvasTexture(canvas);
             tex.magFilter = THREE.NearestFilter;
             tex.minFilter = THREE.NearestFilter;
-            return new THREE.MeshLambertMaterial({ map: tex });
+            return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6, metalness: 0.05 });
         }
 
         let blockMaterials = BLOCK_COLORS.map(c => createBlockTexture(c));
+
+        // --- Переключение полноэкранного режима ---
+        function toggleFullscreen() {
+            if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+                const doc = window.document.documentElement;
+                if (doc.requestFullscreen) doc.requestFullscreen();
+                else if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen();
+            } else {
+                if (document.exitFullscreen) document.exitFullscreen();
+                else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+            }
+        }
 
         // --- Интерфейс Меню ---
         function backToMain() {
@@ -475,12 +501,6 @@
             }
         }
 
-        function enterFullscreen() {
-            const doc = window.document.documentElement;
-            if (doc.requestFullscreen) doc.requestFullscreen();
-            else if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen();
-        }
-
         function startSingleplayer() {
             nickname = document.getElementById('nickname-input').value.trim() || "Игрок";
             isMultiplayer = false;
@@ -493,7 +513,7 @@
             elems.forEach(el => el.style.display = 'none');
             document.getElementById('p2p-host-modal').style.display = 'none';
             document.getElementById('p2p-client-modal').style.display = 'none';
-            enterFullscreen();
+            toggleFullscreen();
         }
 
         // --- Сетевая Логика Offer/Answer ---
@@ -519,11 +539,13 @@
             peerInstance.on('connect', () => {
                 hideAllMenu();
                 initGame();
-                sendNetData({ type: 'handshake', nickname: nickname, skinUrl: skinDataUrl });
+                sendNetData({ type: 'handshake', nickname: nickname, skinUrl: skinDataUrl }, true);
             });
 
             peerInstance.on('data', data => {
-                handleNetData(JSON.parse(data.toString()));
+                try {
+                    handleNetData(JSON.parse(data.toString()));
+                } catch(e) { console.error(e); }
             });
         }
 
@@ -546,9 +568,13 @@
             }
         }
 
-        function sendNetData(obj) {
+        function sendNetData(obj, force = false) {
             if(isMultiplayer && peerInstance && peerInstance.connected) {
-                peerInstance.send(JSON.stringify(obj));
+                const now = performance.now();
+                if(force || (now - lastNetSendTime > 40)) { // 25 FPS лимит пакетов для плавности без фризов
+                    peerInstance.send(JSON.stringify(obj));
+                    lastNetSendTime = now;
+                }
             }
         }
 
@@ -594,23 +620,55 @@
             container.style.display = 'block';
             document.getElementById('game-ui').style.display = 'block';
 
-            // ИСПРАВЛЕНИЕ: Полноценный запуск WebGL рендерера и добавление на страницу
-            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Защита от перегрузки на экранах 4К
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.1;
+            renderer.outputEncoding = THREE.sRGBEncoding;
             container.appendChild(renderer.domElement);
 
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x7ec0ee); 
+            
+            // Закатная атмосфера в стиле BSL/SEUS Шейдеров
+            scene.background = new THREE.Color(0xffaa66); 
+            scene.fog = new THREE.FogExp2(0xe28a52, 0.012); // Мягкий тепло-золотой туман
 
-            camera = new THREE.PerspectiveCamera(65, window.innerWidth/window.innerHeight, 0.05, 2000);
+            camera = new THREE.PerspectiveCamera(65, window.innerWidth/window.innerHeight, 0.05, 1000);
             scene.add(camera);
 
-            let ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            // Освещение для эффекта заката
+            let ambientLight = new THREE.AmbientLight(0xffd1a4, 0.45);
             scene.add(ambientLight);
-            let dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
-            dirLight.position.set(20, 40, 20);
+
+            // Теплый прямой солнечный свет (God Rays & Sunset Light)
+            let dirLight = new THREE.DirectionalLight(0xff9e43, 1.8);
+            dirLight.position.set(50, 25, -40);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 1024;
+            dirLight.shadow.mapSize.height = 1024;
+            dirLight.shadow.camera.near = 0.5;
+            dirLight.shadow.camera.far = 250;
+            let d = 50;
+            dirLight.shadow.camera.left = -d;
+            dirLight.shadow.camera.right = d;
+            dirLight.shadow.camera.top = d;
+            dirLight.shadow.camera.bottom = -d;
+            dirLight.shadow.bias = -0.0005;
             scene.add(dirLight);
+
+            // Мягкий отраженный синеватый свет от неба (для кинематографичного контраста)
+            let hemiLight = new THREE.HemisphereLight(0xffa256, 0x3d4b6e, 0.5);
+            scene.add(hemiLight);
+
+            // Создаем визуальный диск Закатного Солнца
+            let sunGeo = new THREE.SphereGeometry(12, 32, 32);
+            let sunMat = new THREE.MeshBasicMaterial({ color: 0xfff4cc });
+            let sunMesh = new THREE.Mesh(sunGeo, sunMat);
+            sunMesh.position.copy(dirLight.position).multiplyScalar(8);
+            scene.add(sunMesh);
 
             buildOptimizedCozyHouse();
             buildMiniWorldPlatforms();
@@ -629,7 +687,7 @@
         function buildOptimizedCozyHouse() {
             const matWall = createBlockTexture(0xbf9b65); 
             const matFloor = createBlockTexture(0x4d3221); 
-            const matGlass = new THREE.MeshLambertMaterial({ color: 0xddffff, transparent: true, opacity: 0.5 });
+            const matGlass = new THREE.MeshStandardMaterial({ color: 0xe0f7fa, transparent: true, opacity: 0.4, roughness: 0.1 });
             const matRoof = createBlockTexture(0x607d8b); 
 
             let wallPositions = [];
@@ -691,6 +749,8 @@
         function createInstances(positions, material) {
             if(positions.length === 0) return;
             const instancedMesh = new THREE.InstancedMesh(sharedGeometry, material, positions.length);
+            instancedMesh.castShadow = true;
+            instancedMesh.receiveShadow = true;
             const dummy = new THREE.Object3D();
             for(let i=0; i<positions.length; i++) {
                 dummy.position.set(positions[i].x + 0.5, positions[i].y + 0.5, positions[i].z + 0.5);
@@ -707,6 +767,8 @@
                 for(let tz = -1; tz <= 1; tz++) {
                     const mesh = new THREE.Mesh(sharedGeometry, matTableWood);
                     mesh.position.set(x + tx + 0.5, y + 0.5, z + tz + 0.5);
+                    mesh.castShadow = true;
+                    mesh.receiveShadow = true;
                     scene.add(mesh);
                     houseCollisionBoxes.push(mesh.position.clone());
                 }
@@ -715,6 +777,8 @@
             legs.forEach(l => {
                 const legMesh = new THREE.Mesh(sharedGeometry, matTableWood);
                 legMesh.position.set(x + l[0] + 0.5, y - 0.5, z + l[1] + 0.5);
+                legMesh.castShadow = true;
+                legMesh.receiveShadow = true;
                 scene.add(legMesh);
                 houseCollisionBoxes.push(legMesh.position.clone());
             });
@@ -735,8 +799,10 @@
                 for(let x = -MINI_MAP_RADIUS; x <= MINI_MAP_RADIUS; x++) {
                     for(let z = -MINI_MAP_RADIUS; z <= MINI_MAP_RADIUS; z++) {
                         const mesh = new THREE.Mesh(sharedGeometry, matBed);
-                        mesh.position.set(center.x + x + 0.5, center.y, center.z + z + 0.5);
+                        mesh.position.set(center.x + x + 0.5, center.y + 0.5, center.z + z + 0.5);
                         mesh.visible = false; 
+                        mesh.castShadow = true;
+                        mesh.receiveShadow = true;
                         scene.add(mesh);
                         miniWorldBlocks.push({ mesh: mesh, mKey: key, lx: x, ly: 0, lz: z, bIdx: BLOCK_COLORS.indexOf(conf.color) });
                     }
@@ -750,7 +816,9 @@
 
             const conf = MINI_WORLDS[mKey];
             const mesh = new THREE.Mesh(sharedGeometry, blockMaterials[bIdx]);
-            mesh.position.set(conf.center.x + lx + 0.5, conf.center.y + ly, conf.center.z + lz + 0.5);
+            mesh.position.set(conf.center.x + lx + 0.5, conf.center.y + ly + 0.5, conf.center.z + lz + 0.5);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
             
             mesh.visible = (player.currentWorldContext === mKey);
             scene.add(mesh);
@@ -761,7 +829,7 @@
                 const microMesh = new THREE.Mesh(sharedGeometry, blockMaterials[bIdx]);
                 microMesh.scale.set(0.08, 0.08, 0.08);
                 
-                let offset = new THREE.Vector3(lx, ly - 0.5, lz).multiplyScalar(0.08);
+                let offset = new THREE.Vector3(lx, ly, lz).multiplyScalar(0.08);
                 microMesh.position.copy(tableObj.pos).add(offset).y += 0.04;
                 
                 microMesh.visible = (player.currentWorldContext === 'house');
@@ -770,7 +838,7 @@
             }
 
             if(isLocalAction) {
-                sendNetData({ type: 'block_place', mKey: mKey, x: lx, y: ly, z: lz, bIdx: bIdx });
+                sendNetData({ type: 'block_place', mKey: mKey, x: lx, y: ly, z: lz, bIdx: bIdx }, true);
             }
         }
 
@@ -794,7 +862,7 @@
             }
 
             if(isLocalAction) {
-                sendNetData({ type: 'block_break', mKey: mKey, x: lx, y: ly, z: lz });
+                sendNetData({ type: 'block_break', mKey: mKey, x: lx, y: ly, z: lz }, true);
             }
         }
 
@@ -817,36 +885,42 @@
                 const tex = loader.load(customUrl);
                 tex.magFilter = THREE.NearestFilter;
                 tex.minFilter = THREE.NearestFilter;
-                const mat = new THREE.MeshLambertMaterial({ map: tex });
+                const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.8 });
                 matHead = mat; matBody = mat; matLimbs = mat;
             } else {
-                const matWhite = new THREE.MeshLambertMaterial({ color: 0xffffff });
+                const matWhite = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8 });
                 matHead = matWhite; matBody = matWhite; matLimbs = matWhite;
             }
 
             const headGeo = new THREE.BoxGeometry(0.4, 0.4, 0.4);
             const headMesh = new THREE.Mesh(headGeo, matHead);
             headMesh.position.y = 1.6;
+            headMesh.castShadow = true;
             group.add(headMesh);
 
             const bodyGeo = new THREE.BoxGeometry(0.4, 0.6, 0.2);
             const bodyMesh = new THREE.Mesh(bodyGeo, matBody);
             bodyMesh.position.y = 1.1;
+            bodyMesh.castShadow = true;
             group.add(bodyMesh);
 
             const armGeo = new THREE.BoxGeometry(0.15, 0.6, 0.15);
             const leftArm = new THREE.Mesh(armGeo, matLimbs);
             leftArm.position.set(-0.28, 1.1, 0);
+            leftArm.castShadow = true;
             const rightArm = new THREE.Mesh(armGeo, matLimbs);
             rightArm.position.set(0.28, 1.1, 0);
+            rightArm.castShadow = true;
             group.add(leftArm);
             group.add(rightArm);
 
             const legGeo = new THREE.BoxGeometry(0.18, 0.6, 0.18);
             const leftLeg = new THREE.Mesh(legGeo, matLimbs);
             leftLeg.position.set(-0.11, 0.5, 0);
+            leftLeg.castShadow = true;
             const rightLeg = new THREE.Mesh(legGeo, matLimbs);
             rightLeg.position.set(0.11, 0.5, 0);
+            rightLeg.castShadow = true;
             group.add(leftLeg);
             group.add(rightLeg);
 
@@ -952,11 +1026,12 @@
             lookZone.addEventListener('touchend', stopLook, { passive: false });
             lookZone.addEventListener('touchcancel', stopLook, { passive: false });
 
+            // ИСПРАВЛЕНИЕ: Увеличение импульса прыжка с 5.2/6.0 до 6.8, чтобы запрыгивать на блок легко
             document.getElementById('jump-btn').addEventListener('touchstart', e => {
                 e.stopPropagation();
                 e.preventDefault();
                 if(player.isGrounded) {
-                    player.velocity.y = player.currentWorldContext !== 'house' ? 5.2 : 6.0;
+                    player.velocity.y = 6.8;
                 }
             }, { passive: false });
 
@@ -1029,7 +1104,7 @@
                     if(player.pos.distanceTo(table.pos) < 2.0) {
                         player.currentWorldContext = table.key;
                         const conf = MINI_WORLDS[table.key];
-                        player.pos.copy(conf.center).add(new THREE.Vector3(0, 2, 0));
+                        player.pos.copy(conf.center).add(new THREE.Vector3(0, 1.5, 0));
                         player.scaleFactor = 0.08; 
                         switchRenderContext(table.key);
                         document.getElementById('action-world-btn').innerText = "ВЫЙТИ ИЗ МИРА";
@@ -1269,6 +1344,7 @@
             }
         }
 
+        // ТОЧНЫЙ РАСЧЕТ ОПОРА ДРУГА НА СТОЛЕ И В МИРЕ (ИСПРАВЛЕНО ЦЕНТРИРОВАНИЕ)
         function updatePeerRender() {
             if(!isMultiplayer || !peerPlayer.mesh) return;
 
@@ -1282,11 +1358,12 @@
                     if(tableObj) {
                         const conf = MINI_WORLDS[peerPlayer.currentWorldContext];
                         let localOffset = peerPlayer.pos.clone().sub(conf.center);
+                        
+                        // ИСПРАВЛЕНИЕ: Выравнивание центра и ног для стояния ровно по центру микро-блока
+                        localOffset.y -= 0.0; 
                         localOffset.multiplyScalar(0.08); 
 
                         peerPlayer.mesh.position.copy(tableObj.pos).add(localOffset);
-                        peerPlayer.mesh.position.y += 0.08; 
-                        
                         peerPlayer.mesh.scale.set(0.08, 0.08, 0.08);
                         peerPlayer.mesh.visible = true;
                     }
